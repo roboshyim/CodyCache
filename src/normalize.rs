@@ -38,7 +38,10 @@ pub fn apply_shopware_request_normalization(headers: &mut HeaderMap) {
         return;
     }
 
-    let cookie = headers.get(http::header::COOKIE).and_then(|v| v.to_str().ok()).unwrap_or("");
+    let cookie = headers
+        .get(http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
     if cookie.is_empty() {
         return;
     }
@@ -233,33 +236,39 @@ mod tests {
     }
 
     #[test]
-<<<<<<< HEAD
+    fn request_normalization_sets_sw_cache_hash_from_cookie() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::COOKIE,
+            HeaderValue::from_static("a=1; sw-cache-hash=xyz; b=2"),
+        );
+        apply_shopware_request_normalization(&mut headers);
+        assert_eq!(
+            headers.get("sw-cache-hash").unwrap().to_str().unwrap(),
+            "xyz"
+        );
+
+        // header wins
+        let mut headers = HeaderMap::new();
+        headers.insert("sw-cache-hash", HeaderValue::from_static("hdr"));
+        headers.insert(
+            http::header::COOKIE,
+            HeaderValue::from_static("sw-cache-hash=cookie"),
+        );
+        apply_shopware_request_normalization(&mut headers);
+        assert_eq!(
+            headers.get("sw-cache-hash").unwrap().to_str().unwrap(),
+            "hdr"
+        );
+    }
+
+    #[test]
     fn widgets_checkout_info_short_circuit_rules() {
         // missing header => short circuit
         let req = http::Request::builder()
             .uri("/widgets/checkout/info")
             .body(axum::body::Body::empty())
             .unwrap();
-=======
-    fn request_normalization_sets_sw_cache_hash_from_cookie() {
-        let mut headers = HeaderMap::new();
-        headers.insert(http::header::COOKIE, HeaderValue::from_static("a=1; sw-cache-hash=xyz; b=2"));
-        apply_shopware_request_normalization(&mut headers);
-        assert_eq!(headers.get("sw-cache-hash").unwrap().to_str().unwrap(), "xyz");
-
-        // header wins
-        let mut headers = HeaderMap::new();
-        headers.insert("sw-cache-hash", HeaderValue::from_static("hdr"));
-        headers.insert(http::header::COOKIE, HeaderValue::from_static("sw-cache-hash=cookie"));
-        apply_shopware_request_normalization(&mut headers);
-        assert_eq!(headers.get("sw-cache-hash").unwrap().to_str().unwrap(), "hdr");
-    }
-
-    #[test]
-    fn widgets_checkout_info_short_circuit_rules() {
-        // missing header => short circuit
-        let req = http::Request::builder().uri("/widgets/checkout/info").body(axum::body::Body::empty()).unwrap();
->>>>>>> b361b93 (Derive sw-cache-hash header from cookie)
         assert!(should_short_circuit_widgets_checkout_info(&req));
 
         // header present and no sw-states cookie => do not short circuit
