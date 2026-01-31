@@ -214,6 +214,28 @@ impl DiskStore {
         }
         Ok(gone)
     }
+
+    pub fn add_ban(&self, pattern: &str) -> Result<u64, String> {
+        let _g = self.lock.lock();
+        let id = now_ms();
+        let k = format!("ban:{id}");
+        self.db
+            .insert(k.as_bytes(), pattern.as_bytes())
+            .map_err(|e| format!("sled insert: {e}"))?;
+        self.db.flush().map_err(|e| format!("sled flush: {e}"))?;
+        Ok(id)
+    }
+
+    pub fn list_bans(&self) -> Result<Vec<String>, String> {
+        let mut out = Vec::new();
+        for item in self.db.scan_prefix(b"ban:") {
+            let (_k, v) = item.map_err(|e| format!("sled iter: {e}"))?;
+            if let Ok(s) = String::from_utf8(v.to_vec()) {
+                out.push(s);
+            }
+        }
+        Ok(out)
+    }
 }
 
 pub fn headers_to_pairs(headers: &HeaderMap) -> Vec<(String, String)> {

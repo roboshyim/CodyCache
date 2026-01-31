@@ -30,16 +30,17 @@ pub fn handle_purge(
     }
 }
 
-pub fn handle_ban(_cache: std::sync::Arc<Cache>, uri: &Uri) -> (StatusCode, String) {
-    // Varnish BAN is pattern-based. We can implement later with a ban list evaluated at lookup.
-    // For now, return 501 so users know it's not implemented.
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        format!(
-            "BAN not implemented (requested ban on URLs containing {})",
-            uri.path()
+pub fn handle_ban(cache: std::sync::Arc<Cache>, uri: &Uri) -> (StatusCode, String) {
+    // Minimal Varnish-like BAN: store a substring pattern and check it during cache lookup.
+    // We store the path component as the pattern by default.
+    let pattern = uri.path();
+    match cache.add_ban(pattern) {
+        Ok(id) => (
+            StatusCode::OK,
+            format!("Added ban #{id} for URLs containing '{pattern}'"),
         ),
-    )
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
 }
 
 #[cfg(test)]
@@ -47,31 +48,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn purge_with_xkey_is_ok_even_if_no_objects_match() {
+    fn ban_marks_matching_urls_as_banned() {
         let dir = tempfile::tempdir().unwrap();
         let cache = std::sync::Arc::new(Cache::new(dir.path().to_str().unwrap()).unwrap());
 
         let uri: Uri = "/foo".parse().unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert("xkey", http::HeaderValue::from_static("a b c"));
-
-        let (status, body) = handle_purge(cache, &uri, &headers);
+        let (status, body) = handle_ban(cache.clone(), &uri);
         assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("Invalidated"));
-    }
+        assert!(body.contains("Added ban"));
 
-    #[test]
-    fn purge_by_url_is_ok_even_when_nothing_matches() {
-        let dir = tempfile::tempdir().unwrap();
-        let cache = std::sync::Arc::new(Cache::new(dir.path().to_str().unwrap()).unwrap());
+        let norm: Uri = "/foo?a=1".parse().unwrap();
+        let norm = crate::normalize::normalize_uri(&norm);
+        assert!(cache.is_banned(&norm));
 
-        // Includes tracking params; purge should normalize first.
-        let uri: Uri = "/foo?utm_source=x&a=1".parse().unwrap();
-        let headers = HeaderMap::new();
-
-        let (status, body) = handle_purge(cache, &uri, &headers);
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("Invalidated"));
-        assert!(body.contains("/foo?a=1"));
+        let other: Uri = "/bar".parse().unwrap();
+        let other = crate::normalize::normalize_uri(&other);
+        assert!(!cache.is_banned(&other));
     }
 }

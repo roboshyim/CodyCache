@@ -13,15 +13,20 @@ struct CacheInner {
     // Small in-memory hot index for quick negatives + stats. Bodies live on disk.
     known: HashMap<String, ()>,
     disk: disk::DiskStore,
+
+    // BAN patterns; if request URL contains any pattern, treat as miss.
+    bans: Vec<String>,
 }
 
 impl Cache {
     pub fn new(cache_dir: &str) -> Result<Self, String> {
         let disk = disk::DiskStore::open(cache_dir)?;
+        let bans = disk.list_bans().unwrap_or_default();
         Ok(Self {
             inner: Arc::new(RwLock::new(CacheInner {
                 known: HashMap::new(),
                 disk,
+                bans,
             })),
         })
     }
@@ -41,6 +46,19 @@ impl Cache {
         let inner = self.inner.read();
         inner.disk.remove_by_url(normalized_url)
     }
+
+    pub fn add_ban(&self, pattern: &str) -> Result<u64, String> {
+        let mut inner = self.inner.write();
+        let id = inner.disk.add_ban(pattern)?;
+        inner.bans.push(pattern.to_string());
+        Ok(id)
+    }
+
+    pub fn is_banned(&self, normalized_url: &Uri) -> bool {
+        let inner = self.inner.read();
+        let u = normalized_url.to_string();
+        inner.bans.iter().any(|p| !p.is_empty() && u.contains(p))
+    }
 }
 
 pub async fn handle_cached(
@@ -53,7 +71,10 @@ pub async fn handle_cached(
 
     let cache_key = build_cache_key(&norm_uri, &parts.headers);
 
-    if let Some(resp) = lookup(&state.cache, &cache_key, &parts.headers, &norm_uri)? {
+    // BAN logic: if URL is banned, skip cache.
+    if state.cache.is_banned(&norm_uri) {
+        // fall through to upstream
+    } else if let Some(resp) = lookup(&state.cache, &cache_key, &parts.headers, &norm_uri)? {
         return Ok(resp);
     }
 
