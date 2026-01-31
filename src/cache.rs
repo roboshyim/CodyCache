@@ -61,7 +61,9 @@ pub async fn handle_cached(
         http::HeaderValue::from_static("shopware=ESI/1.0"),
     );
 
-    let body_bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap_or_default();
+    let body_bytes = axum::body::to_bytes(body, usize::MAX)
+        .await
+        .unwrap_or_default();
 
     let up = state
         .client
@@ -74,14 +76,22 @@ pub async fn handle_cached(
 
     let status = up.status();
     let mut resp_headers = up.headers().clone();
-    let bytes = up.bytes().await.map_err(|e| format!("upstream body: {e}"))?;
+    let bytes = up
+        .bytes()
+        .await
+        .map_err(|e| format!("upstream body: {e}"))?;
 
     // Decide TTL
     let ttl = ttl_from_headers(&resp_headers).unwrap_or(Duration::from_secs(0));
-    let cacheable = ttl.as_secs() > 0 && (parts.method == http::Method::GET || parts.method == http::Method::HEAD);
+    let cacheable = ttl.as_secs() > 0
+        && (parts.method == http::Method::GET || parts.method == http::Method::HEAD);
 
     // VCL: sw-dynamic-cache-bypass => hit-for-miss 1s
-    if resp_headers.get("sw-dynamic-cache-bypass").and_then(|v| v.to_str().ok()) == Some("1") {
+    if resp_headers
+        .get("sw-dynamic-cache-bypass")
+        .and_then(|v| v.to_str().ok())
+        == Some("1")
+    {
         resp_headers.remove("sw-dynamic-cache-bypass");
         return Ok(build_response(status, resp_headers, bytes, &norm_uri));
     }
@@ -99,7 +109,10 @@ pub async fn handle_cached(
 fn build_cache_key(uri: &Uri, headers: &HeaderMap) -> String {
     let mut key = uri.to_string();
 
-    let ctx = headers.get("sw-cache-hash").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let ctx = headers
+        .get("sw-cache-hash")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
     let cur = extract_cookie(headers, "sw-currency").unwrap_or_default();
 
     if !ctx.is_empty() {
@@ -126,7 +139,12 @@ fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     None
 }
 
-fn lookup(cache: &Cache, key: &str, req_headers: &HeaderMap, uri: &Uri) -> Result<Option<axum::response::Response>, String> {
+fn lookup(
+    cache: &Cache,
+    key: &str,
+    req_headers: &HeaderMap,
+    uri: &Uri,
+) -> Result<Option<axum::response::Response>, String> {
     let inner = cache.inner.read();
     let Some((meta, body)) = inner.disk.get(key)? else {
         return Ok(None);
@@ -142,7 +160,10 @@ fn lookup(cache: &Cache, key: &str, req_headers: &HeaderMap, uri: &Uri) -> Resul
     }
 
     // VCL hit logic: pass if client states matches invalidation states
-    if let (Some(req_states), Some(obj_states)) = (extract_cookie(req_headers, "sw-states"), meta.invalidation_states.as_deref()) {
+    if let (Some(req_states), Some(obj_states)) = (
+        extract_cookie(req_headers, "sw-states"),
+        meta.invalidation_states.as_deref(),
+    ) {
         if req_states.contains("logged-in") && obj_states.contains("logged-in") {
             return Ok(None);
         }
@@ -179,7 +200,11 @@ fn store(
     let tags = headers
         .get("xkey")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.split_whitespace().map(|t| t.to_string()).collect::<Vec<_>>())
+        .map(|s| {
+            s.split_whitespace()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
 
     let invalidation_states = headers
@@ -215,7 +240,12 @@ fn ttl_from_headers(headers: &HeaderMap) -> Option<Duration> {
     None
 }
 
-fn build_response(status: http::StatusCode, mut headers: HeaderMap, bytes: Bytes, uri: &Uri) -> axum::response::Response {
+fn build_response(
+    status: http::StatusCode,
+    mut headers: HeaderMap,
+    bytes: Bytes,
+    uri: &Uri,
+) -> axum::response::Response {
     normalize::apply_client_cache_policy(uri, &mut headers);
     normalize::strip_internal_headers(&mut headers);
 
@@ -225,4 +255,66 @@ fn build_response(status: http::StatusCode, mut headers: HeaderMap, bytes: Bytes
         .unwrap();
     *resp.headers_mut() = headers;
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_key_varies_by_context_hash_when_present() {
+        let uri: Uri = "/foo?a=1".parse().unwrap();
+        let mut h1 = HeaderMap::new();
+        h1.insert("sw-cache-hash", http::HeaderValue::from_static("abc"));
+        h1.insert(
+            http::header::COOKIE,
+            http::HeaderValue::from_static("sw-currency=EUR"),
+        );
+
+        let mut h2 = HeaderMap::new();
+        h2.insert("sw-cache-hash", http::HeaderValue::from_static("def"));
+        h2.insert(
+            http::header::COOKIE,
+            http::HeaderValue::from_static("sw-currency=EUR"),
+        );
+
+        let k1 = build_cache_key(&uri, &h1);
+        let k2 = build_cache_key(&uri, &h2);
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn cache_key_falls_back_to_currency_when_no_context_hash() {
+        let uri: Uri = "/foo?a=1".parse().unwrap();
+
+        let mut h1 = HeaderMap::new();
+        h1.insert(
+            http::header::COOKIE,
+            http::HeaderValue::from_static("sw-currency=EUR"),
+        );
+
+        let mut h2 = HeaderMap::new();
+        h2.insert(
+            http::header::COOKIE,
+            http::HeaderValue::from_static("sw-currency=USD"),
+        );
+
+        let k1 = build_cache_key(&uri, &h1);
+        let k2 = build_cache_key(&uri, &h2);
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn extract_cookie_parses_simple_cookie_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::COOKIE,
+            http::HeaderValue::from_static("a=1; sw-currency=EUR; b=2"),
+        );
+        assert_eq!(
+            extract_cookie(&headers, "sw-currency").as_deref(),
+            Some("EUR")
+        );
+        assert_eq!(extract_cookie(&headers, "missing"), None);
+    }
 }

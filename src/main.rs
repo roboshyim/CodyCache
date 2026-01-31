@@ -26,14 +26,21 @@ async fn main() {
 
     let state = AppState { cfg, cache, client };
 
-    let app = Router::new().route("/*path", any(handle)).with_state(state.clone());
+    let app = Router::new()
+        .route("/*path", any(handle))
+        .with_state(state.clone());
 
-    let listener = tokio::net::TcpListener::bind(&state.cfg.listen).await.expect("bind");
+    let listener = tokio::net::TcpListener::bind(&state.cfg.listen)
+        .await
+        .expect("bind");
     info!(listen = %state.cfg.listen, origin = %state.cfg.origin, cache_dir = %state.cfg.cache_dir, "CodyCache listening");
 
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .await
-        .expect("serve");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .expect("serve");
 }
 
 async fn handle(
@@ -45,7 +52,9 @@ async fn handle(
     let uri = req.uri().clone();
 
     // PURGE/BAN handling
-    if method == Method::from_bytes(b"PURGE").unwrap() || method == Method::from_bytes(b"BAN").unwrap() {
+    if method == Method::from_bytes(b"PURGE").unwrap()
+        || method == Method::from_bytes(b"BAN").unwrap()
+    {
         if !purge::is_purger_allowed(peer.ip(), &state.cfg.purgers) {
             return (StatusCode::FORBIDDEN, "Forbidden").into_response();
         }
@@ -73,10 +82,10 @@ async fn handle(
     }
 
     // Special-case widgets checkout info
-    if uri.path() == "/widgets/checkout/info" {
-        if normalize::should_short_circuit_widgets_checkout_info(&req) {
-            return (StatusCode::NO_CONTENT, "").into_response();
-        }
+    if uri.path() == "/widgets/checkout/info"
+        && normalize::should_short_circuit_widgets_checkout_info(&req)
+    {
+        return (StatusCode::NO_CONTENT, "").into_response();
     }
 
     match cache::handle_cached(state.clone(), peer, req).await {
@@ -84,12 +93,24 @@ async fn handle(
         Err(e) => {
             warn!(error = %e, %uri, "cache handler error; proxying");
             // fall back to a direct proxy using the original URI
-            proxy_only(state, peer, Request::builder().uri(uri).body(axum::body::Body::empty()).unwrap()).await
+            proxy_only(
+                state,
+                peer,
+                Request::builder()
+                    .uri(uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
         }
     }
 }
 
-async fn proxy_only(state: AppState, peer: SocketAddr, req: Request<axum::body::Body>) -> axum::response::Response {
+async fn proxy_only(
+    state: AppState,
+    peer: SocketAddr,
+    req: Request<axum::body::Body>,
+) -> axum::response::Response {
     let mut headers = req.headers().clone();
     normalize::apply_forwarded_for(&mut headers, peer.ip());
     headers.insert(
@@ -101,7 +122,9 @@ async fn proxy_only(state: AppState, peer: SocketAddr, req: Request<axum::body::
     let upstream_url = normalize::build_upstream_url(&state.cfg.origin, &parts.uri);
 
     // Buffering for now (later: streaming)
-    let body_bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap_or_default();
+    let body_bytes = axum::body::to_bytes(body, usize::MAX)
+        .await
+        .unwrap_or_default();
 
     match state
         .client
