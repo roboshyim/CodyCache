@@ -36,6 +36,11 @@ impl Cache {
         let inner = self.inner.read();
         inner.disk.remove_by_tags(tags)
     }
+
+    pub fn purge_url(&self, normalized_url: &str) -> Result<usize, String> {
+        let inner = self.inner.read();
+        inner.disk.remove_by_url(normalized_url)
+    }
 }
 
 pub async fn handle_cached(
@@ -100,7 +105,15 @@ pub async fn handle_cached(
         // Strip Set-Cookie on cacheable responses
         resp_headers.remove(http::header::SET_COOKIE);
 
-        store(&state.cache, &cache_key, status, &resp_headers, &bytes, ttl)?;
+        store(
+            &state.cache,
+            &cache_key,
+            &norm_uri,
+            status,
+            &resp_headers,
+            &bytes,
+            ttl,
+        )?;
     }
 
     Ok(build_response(status, resp_headers, bytes, &norm_uri))
@@ -190,6 +203,7 @@ fn lookup(
 fn store(
     cache: &Cache,
     key: &str,
+    url: &Uri,
     status: http::StatusCode,
     headers: &HeaderMap,
     body: &Bytes,
@@ -213,6 +227,7 @@ fn store(
         .map(|s| s.to_string());
 
     let meta = disk::StoredMeta {
+        url: url.to_string(),
         stored_at_ms: disk::now_ms(),
         ttl_ms: ttl.as_millis() as u64,
         grace_ms: grace.as_millis() as u64,

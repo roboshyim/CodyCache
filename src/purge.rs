@@ -20,11 +20,14 @@ pub fn handle_purge(
         }
     }
 
-    // TODO: implement URL->keys index (respect variants). For now: return 501 so it isn't misleading.
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        format!("PURGE-by-URL not implemented (requested {})", uri.path()),
-    )
+    let normalized = crate::normalize::normalize_uri(uri);
+    match cache.purge_url(&normalized.to_string()) {
+        Ok(gone) => (
+            StatusCode::OK,
+            format!("Invalidated {gone} objects for {normalized}"),
+        ),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
 }
 
 pub fn handle_ban(_cache: std::sync::Arc<Cache>, uri: &Uri) -> (StatusCode, String) {
@@ -58,15 +61,17 @@ mod tests {
     }
 
     #[test]
-    fn purge_without_xkey_returns_not_implemented() {
+    fn purge_by_url_is_ok_even_when_nothing_matches() {
         let dir = tempfile::tempdir().unwrap();
         let cache = std::sync::Arc::new(Cache::new(dir.path().to_str().unwrap()).unwrap());
 
-        let uri: Uri = "/foo".parse().unwrap();
+        // Includes tracking params; purge should normalize first.
+        let uri: Uri = "/foo?utm_source=x&a=1".parse().unwrap();
         let headers = HeaderMap::new();
 
         let (status, body) = handle_purge(cache, &uri, &headers);
-        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
-        assert!(body.contains("PURGE-by-URL not implemented"));
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Invalidated"));
+        assert!(body.contains("/foo?a=1"));
     }
 }

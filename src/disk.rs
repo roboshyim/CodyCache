@@ -18,6 +18,12 @@ pub struct DiskStore {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StoredMeta {
+    /// Normalized URL (path + sorted query) for this object.
+    ///
+    /// Added later; may be absent for older entries.
+    #[serde(default)]
+    pub url: String,
+
     pub stored_at_ms: u64,
     pub ttl_ms: u64,
     pub grace_ms: u64,
@@ -69,9 +75,25 @@ impl DiskStore {
         fs::write(dir.join("meta.json"), meta_bytes).map_err(|e| format!("write meta: {e}"))?;
         fs::write(dir.join("body.bin"), body).map_err(|e| format!("write body: {e}"))?;
 
-        // Update tag index in sled: tag:<tag> -> Vec<String>
+        // Update tag index in sled: tag:<tag> -> Set<key>
         for tag in &meta.tags {
             let k = format!("tag:{tag}");
+            let mut set: std::collections::BTreeSet<String> = self
+                .db
+                .get(&k)
+                .map_err(|e| format!("sled get: {e}"))?
+                .map(|v| bincode::deserialize(&v).unwrap_or_default())
+                .unwrap_or_default();
+            set.insert(key.to_string());
+            let enc = bincode::serialize(&set).map_err(|e| format!("bincode: {e}"))?;
+            self.db
+                .insert(k.as_bytes(), enc)
+                .map_err(|e| format!("sled insert: {e}"))?;
+        }
+
+        // Update URL index: url:<normalized_url> -> Set<key>
+        if !meta.url.is_empty() {
+            let k = format!("url:{}", meta.url);
             let mut set: std::collections::BTreeSet<String> = self
                 .db
                 .get(&k)
@@ -96,11 +118,31 @@ impl DiskStore {
             return Ok(false);
         }
 
-        // Read meta to remove tag index
+        // Read meta to remove secondary indexes
         if let Ok(meta_bytes) = fs::read(dir.join("meta.json")) {
             if let Ok(meta) = serde_json::from_slice::<StoredMeta>(&meta_bytes) {
                 for tag in meta.tags {
                     let k = format!("tag:{tag}");
+                    if let Some(v) = self.db.get(&k).map_err(|e| format!("sled get: {e}"))? {
+                        let mut set: std::collections::BTreeSet<String> =
+                            bincode::deserialize(&v).unwrap_or_default();
+                        set.remove(key);
+                        if set.is_empty() {
+                            self.db
+                                .remove(k.as_bytes())
+                                .map_err(|e| format!("sled remove: {e}"))?;
+                        } else {
+                            let enc =
+                                bincode::serialize(&set).map_err(|e| format!("bincode: {e}"))?;
+                            self.db
+                                .insert(k.as_bytes(), enc)
+                                .map_err(|e| format!("sled insert: {e}"))?;
+                        }
+                    }
+                }
+
+                if !meta.url.is_empty() {
+                    let k = format!("url:{}", meta.url);
                     if let Some(v) = self.db.get(&k).map_err(|e| format!("sled get: {e}"))? {
                         let mut set: std::collections::BTreeSet<String> =
                             bincode::deserialize(&v).unwrap_or_default();
@@ -142,6 +184,30 @@ impl DiskStore {
         let mut gone = 0;
         for key in keys {
             // use remove_key to clean tag index
+            if self.remove_key(&key)? {
+                gone += 1;
+            }
+        }
+        Ok(gone)
+    }
+
+    pub fn remove_by_url(&self, normalized_url: &str) -> Result<usize, String> {
+        let _g = self.lock.lock();
+        let idx_key = format!("url:{normalized_url}");
+        let mut keys: std::collections::BTreeSet<String> = Default::default();
+
+        if let Some(v) = self
+            .db
+            .get(&idx_key)
+            .map_err(|e| format!("sled get: {e}"))?
+        {
+            let set: std::collections::BTreeSet<String> =
+                bincode::deserialize(&v).unwrap_or_default();
+            keys.extend(set);
+        }
+
+        let mut gone = 0;
+        for key in keys {
             if self.remove_key(&key)? {
                 gone += 1;
             }
