@@ -226,3 +226,47 @@ fn build_response(status: http::StatusCode, mut headers: HeaderMap, bytes: Bytes
     *resp.headers_mut() = headers;
     resp
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_key_varies_by_context_hash_when_present() {
+        let uri: Uri = "/foo?a=1".parse().unwrap();
+        let mut h1 = HeaderMap::new();
+        h1.insert("sw-cache-hash", http::HeaderValue::from_static("abc"));
+        h1.insert(http::header::COOKIE, http::HeaderValue::from_static("sw-currency=EUR"));
+
+        let mut h2 = HeaderMap::new();
+        h2.insert("sw-cache-hash", http::HeaderValue::from_static("def"));
+        h2.insert(http::header::COOKIE, http::HeaderValue::from_static("sw-currency=EUR"));
+
+        let k1 = build_cache_key(&uri, &h1);
+        let k2 = build_cache_key(&uri, &h2);
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn cache_key_falls_back_to_currency_when_no_context_hash() {
+        let uri: Uri = "/foo?a=1".parse().unwrap();
+
+        let mut h1 = HeaderMap::new();
+        h1.insert(http::header::COOKIE, http::HeaderValue::from_static("sw-currency=EUR"));
+
+        let mut h2 = HeaderMap::new();
+        h2.insert(http::header::COOKIE, http::HeaderValue::from_static("sw-currency=USD"));
+
+        let k1 = build_cache_key(&uri, &h1);
+        let k2 = build_cache_key(&uri, &h2);
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn extract_cookie_parses_simple_cookie_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(http::header::COOKIE, http::HeaderValue::from_static("a=1; sw-currency=EUR; b=2"));
+        assert_eq!(extract_cookie(&headers, "sw-currency").as_deref(), Some("EUR"));
+        assert_eq!(extract_cookie(&headers, "missing"), None);
+    }
+}

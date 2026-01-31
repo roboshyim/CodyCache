@@ -25,3 +25,35 @@ pub fn handle_ban(_cache: std::sync::Arc<Cache>, uri: &Uri) -> (StatusCode, Stri
     // For now, return 501 so users know it's not implemented.
     (StatusCode::NOT_IMPLEMENTED, format!("BAN not implemented (requested ban on URLs containing {})", uri.path()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn purge_with_xkey_is_ok_even_if_no_objects_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = std::sync::Arc::new(Cache::new(dir.path().to_str().unwrap()).unwrap());
+
+        let uri: Uri = "/foo".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("xkey", http::HeaderValue::from_static("a b c"));
+
+        let (status, body) = handle_purge(cache, &uri, &headers);
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Invalidated"));
+    }
+
+    #[test]
+    fn purge_without_xkey_returns_not_implemented() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = std::sync::Arc::new(Cache::new(dir.path().to_str().unwrap()).unwrap());
+
+        let uri: Uri = "/foo".parse().unwrap();
+        let headers = HeaderMap::new();
+
+        let (status, body) = handle_purge(cache, &uri, &headers);
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert!(body.contains("PURGE-by-URL not implemented"));
+    }
+}

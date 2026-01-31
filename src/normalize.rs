@@ -138,3 +138,63 @@ pub fn apply_client_cache_policy(uri: &Uri, headers: &mut HeaderMap) {
 pub fn synth(code: StatusCode, body: &'static str) -> impl IntoResponse {
     (code, body)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_uri_drops_tracking_and_sorts_query() {
+        let uri: Uri = "/search?utm_source=x&_ga=1&b=2&a=1&gclid=zzz".parse().unwrap();
+        let out = normalize_uri(&uri);
+        // utm_* / _ga / gclid are removed
+        assert_eq!(out.to_string(), "/search?a=1&b=2");
+    }
+
+    #[test]
+    fn pass_paths_match_shopware_rules() {
+        assert!(is_pass_path("/checkout"));
+        assert!(is_pass_path("/checkout/confirm"));
+        assert!(is_pass_path("/account"));
+        assert!(is_pass_path("/admin/api"));
+        assert!(is_pass_path("/api"));
+        assert!(is_pass_path("/api/foo"));
+
+        assert!(!is_pass_path("/"));
+        assert!(!is_pass_path("/listing"));
+        assert!(!is_pass_path("/store-api/search"));
+    }
+
+    #[test]
+    fn widgets_checkout_info_short_circuit_rules() {
+        // missing header => short circuit
+        let req = http::Request::builder().uri("/widgets/checkout/info").body(axum::body::Body::empty()).unwrap();
+        assert!(should_short_circuit_widgets_checkout_info(&req));
+
+        // header present and no sw-states cookie => do not short circuit
+        let req = http::Request::builder()
+            .uri("/widgets/checkout/info")
+            .header("sw-cache-hash", "abc")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert!(!should_short_circuit_widgets_checkout_info(&req));
+
+        // header present and sw-states exists but missing cart-filled => short circuit
+        let req = http::Request::builder()
+            .uri("/widgets/checkout/info")
+            .header("sw-cache-hash", "abc")
+            .header(http::header::COOKIE, "sw-states=logged-in")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert!(should_short_circuit_widgets_checkout_info(&req));
+
+        // header present and sw-states includes cart-filled => do not short circuit
+        let req = http::Request::builder()
+            .uri("/widgets/checkout/info")
+            .header("sw-cache-hash", "abc")
+            .header(http::header::COOKIE, "sw-states=logged-in,cart-filled")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert!(!should_short_circuit_widgets_checkout_info(&req));
+    }
+}
