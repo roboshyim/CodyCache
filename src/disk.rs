@@ -3,8 +3,7 @@ use http::HeaderMap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
-    fs,
-    io,
+    fs, io,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -33,7 +32,11 @@ impl DiskStore {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(root.join("entries")).map_err(|e| format!("create cache dir: {e}"))?;
         let db = sled::open(root.join("index")).map_err(|e| format!("open sled: {e}"))?;
-        Ok(Self { root, db, lock: Mutex::new(()) })
+        Ok(Self {
+            root,
+            db,
+            lock: Mutex::new(()),
+        })
     }
 
     fn entry_dir(&self, key: &str) -> PathBuf {
@@ -50,7 +53,8 @@ impl DiskStore {
         }
 
         let meta_bytes = fs::read(&meta_path).map_err(|e| format!("read meta: {e}"))?;
-        let meta: StoredMeta = serde_json::from_slice(&meta_bytes).map_err(|e| format!("parse meta: {e}"))?;
+        let meta: StoredMeta =
+            serde_json::from_slice(&meta_bytes).map_err(|e| format!("parse meta: {e}"))?;
         let body = fs::read(&body_path).map_err(|e| format!("read body: {e}"))?;
         Ok(Some((meta, Bytes::from(body))))
     }
@@ -76,7 +80,9 @@ impl DiskStore {
                 .unwrap_or_default();
             set.insert(key.to_string());
             let enc = bincode::serialize(&set).map_err(|e| format!("bincode: {e}"))?;
-            self.db.insert(k.as_bytes(), enc).map_err(|e| format!("sled insert: {e}"))?;
+            self.db
+                .insert(k.as_bytes(), enc)
+                .map_err(|e| format!("sled insert: {e}"))?;
         }
 
         self.db.flush().map_err(|e| format!("sled flush: {e}"))?;
@@ -96,13 +102,19 @@ impl DiskStore {
                 for tag in meta.tags {
                     let k = format!("tag:{tag}");
                     if let Some(v) = self.db.get(&k).map_err(|e| format!("sled get: {e}"))? {
-                        let mut set: std::collections::BTreeSet<String> = bincode::deserialize(&v).unwrap_or_default();
+                        let mut set: std::collections::BTreeSet<String> =
+                            bincode::deserialize(&v).unwrap_or_default();
                         set.remove(key);
                         if set.is_empty() {
-                            self.db.remove(k.as_bytes()).map_err(|e| format!("sled remove: {e}"))?;
+                            self.db
+                                .remove(k.as_bytes())
+                                .map_err(|e| format!("sled remove: {e}"))?;
                         } else {
-                            let enc = bincode::serialize(&set).map_err(|e| format!("bincode: {e}"))?;
-                            self.db.insert(k.as_bytes(), enc).map_err(|e| format!("sled insert: {e}"))?;
+                            let enc =
+                                bincode::serialize(&set).map_err(|e| format!("bincode: {e}"))?;
+                            self.db
+                                .insert(k.as_bytes(), enc)
+                                .map_err(|e| format!("sled insert: {e}"))?;
                         }
                     }
                 }
@@ -121,7 +133,8 @@ impl DiskStore {
         for tag in tags {
             let k = format!("tag:{tag}");
             if let Some(v) = self.db.get(&k).map_err(|e| format!("sled get: {e}"))? {
-                let set: std::collections::BTreeSet<String> = bincode::deserialize(&v).unwrap_or_default();
+                let set: std::collections::BTreeSet<String> =
+                    bincode::deserialize(&v).unwrap_or_default();
                 keys.extend(set);
             }
         }
@@ -147,7 +160,10 @@ pub fn headers_to_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
 pub fn pairs_to_headers(pairs: &[(String, String)]) -> HeaderMap {
     let mut out = HeaderMap::new();
     for (k, v) in pairs {
-        if let (Ok(name), Ok(val)) = (http::header::HeaderName::from_bytes(k.as_bytes()), http::HeaderValue::from_str(v)) {
+        if let (Ok(name), Ok(val)) = (
+            http::header::HeaderName::from_bytes(k.as_bytes()),
+            http::HeaderValue::from_str(v),
+        ) {
             out.insert(name, val);
         }
     }
@@ -155,7 +171,10 @@ pub fn pairs_to_headers(pairs: &[(String, String)]) -> HeaderMap {
 }
 
 pub fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_millis() as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::from_secs(0))
+        .as_millis() as u64
 }
 
 fn remove_dir_all_best_effort(path: &Path) {
