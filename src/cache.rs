@@ -79,53 +79,77 @@ pub async fn handle_cached(
     // BAN logic: if URL is banned, skip cache.
     let banned = state.cache.is_banned(&norm_uri);
 
-    if !banned {
-        if let Some((resp, stale)) = lookup(&state.cache, &cache_key, &parts.headers, &norm_uri)? {
-            if !stale {
+    if banned {
+        // Observability: explicitly mark ban bypass.
+    } else if let Some((mut resp, decision)) =
+        lookup(&state.cache, &cache_key, &parts.headers, &norm_uri)?
+    {
+        match decision {
+            CacheDecision::Hit => {
+                resp.headers_mut().insert(
+                    http::header::HeaderName::from_static("x-codycache"),
+                    http::HeaderValue::from_static("HIT"),
+                );
                 return Ok(resp);
             }
+            CacheDecision::HitForMiss => {
+                // Varnish-like hit-for-miss: bypass cache for a short time.
+                let (status, resp_headers, bytes) =
+                    fetch_upstream_raw(&state, &parts, &norm_uri, body_bytes.clone()).await?;
 
-            // Stale within grace: try to refresh from origin; serve stale only if origin fails.
-            match fetch_upstream_raw(&state, &parts, &norm_uri, body_bytes.clone()).await {
-                Ok((status, mut resp_headers, bytes)) => {
-                    // Origin errors => serve stale
-                    if status.is_server_error() {
-                        let mut resp = resp;
+                let mut out = build_response(status, resp_headers, bytes, &norm_uri);
+                out.headers_mut().insert(
+                    http::header::HeaderName::from_static("x-codycache"),
+                    http::HeaderValue::from_static("BYPASS"),
+                );
+                return Ok(out);
+            }
+            CacheDecision::Stale => {
+                // Stale within grace: try to refresh from origin; serve stale only if origin fails.
+                match fetch_upstream_raw(&state, &parts, &norm_uri, body_bytes.clone()).await {
+                    Ok((status, mut resp_headers, bytes)) => {
+                        // Origin errors => serve stale
+                        if status.is_server_error() {
+                            resp.headers_mut().insert(
+                                http::header::HeaderName::from_static("x-codycache"),
+                                http::HeaderValue::from_static("STALE"),
+                            );
+                            return Ok(resp);
+                        }
+
+                        let ttl = ttl_from_headers(&resp_headers).unwrap_or(Duration::from_secs(0));
+                        let cacheable = ttl.as_secs() > 0
+                            && (parts.method == http::Method::GET
+                                || parts.method == http::Method::HEAD);
+
+                        if cacheable {
+                            resp_headers.remove(http::header::SET_COOKIE);
+                            store(
+                                &state.cache,
+                                &cache_key,
+                                &norm_uri,
+                                status,
+                                &resp_headers,
+                                &bytes,
+                                ttl,
+                            )?;
+                        }
+
+                        let mut out = build_response(status, resp_headers, bytes, &norm_uri);
+                        out.headers_mut().insert(
+                            http::header::HeaderName::from_static("x-codycache"),
+                            http::HeaderValue::from_static("REFRESH"),
+                        );
+                        return Ok(out);
+                    }
+                    Err(_e) => {
+                        // Serve stale
                         resp.headers_mut().insert(
                             http::header::HeaderName::from_static("x-codycache"),
                             http::HeaderValue::from_static("STALE"),
                         );
                         return Ok(resp);
                     }
-
-                    let ttl = ttl_from_headers(&resp_headers).unwrap_or(Duration::from_secs(0));
-                    let cacheable = ttl.as_secs() > 0
-                        && (parts.method == http::Method::GET
-                            || parts.method == http::Method::HEAD);
-
-                    if cacheable {
-                        resp_headers.remove(http::header::SET_COOKIE);
-                        store(
-                            &state.cache,
-                            &cache_key,
-                            &norm_uri,
-                            status,
-                            &resp_headers,
-                            &bytes,
-                            ttl,
-                        )?;
-                    }
-
-                    return Ok(build_response(status, resp_headers, bytes, &norm_uri));
-                }
-                Err(_e) => {
-                    // Serve stale
-                    let mut resp = resp;
-                    resp.headers_mut().insert(
-                        http::header::HeaderName::from_static("x-codycache"),
-                        http::HeaderValue::from_static("STALE"),
-                    );
-                    return Ok(resp);
                 }
             }
         }
@@ -147,8 +171,21 @@ pub async fn handle_cached(
         == Some("1")
     {
         resp_headers.remove("sw-dynamic-cache-bypass");
-        return Ok(build_response(status, resp_headers, bytes, &norm_uri));
+
+        // Store a short-lived hit-for-miss marker so subsequent requests bypass cache
+        // and we don't repeatedly attempt to cache this URL.
+        let hfm_ttl = Duration::from_secs(1);
+        store_hit_for_miss(&state.cache, &cache_key, &norm_uri, hfm_ttl)?;
+
+        let mut out = build_response(status, resp_headers, bytes, &norm_uri);
+        out.headers_mut().insert(
+            http::header::HeaderName::from_static("x-codycache"),
+            http::HeaderValue::from_static("BYPASS"),
+        );
+        return Ok(out);
     }
+
+    let mut cache_status = if banned { "BAN" } else { "MISS" };
 
     if cacheable {
         // Strip Set-Cookie on cacheable responses
@@ -163,9 +200,15 @@ pub async fn handle_cached(
             &bytes,
             ttl,
         )?;
+        cache_status = if banned { "BAN" } else { "MISS" };
     }
 
-    Ok(build_response(status, resp_headers, bytes, &norm_uri))
+    let mut out = build_response(status, resp_headers, bytes, &norm_uri);
+    out.headers_mut().insert(
+        http::header::HeaderName::from_static("x-codycache"),
+        http::HeaderValue::from_static(cache_status),
+    );
+    Ok(out)
 }
 
 fn build_cache_key(uri: &Uri, headers: &HeaderMap) -> String {
@@ -201,12 +244,19 @@ fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     None
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum CacheDecision {
+    Hit,
+    Stale,
+    HitForMiss,
+}
+
 fn lookup(
     cache: &Cache,
     key: &str,
     req_headers: &HeaderMap,
     uri: &Uri,
-) -> Result<Option<(axum::response::Response, bool)>, String> {
+) -> Result<Option<(axum::response::Response, CacheDecision)>, String> {
     let inner = cache.inner.read();
     let Some((meta, body)) = inner.disk.get(key)? else {
         return Ok(None);
@@ -222,6 +272,16 @@ fn lookup(
     }
 
     let stale = !fresh;
+
+    // Hit-for-miss marker: do not serve, but signal caller to bypass cache for a short time.
+    if meta.hit_for_miss {
+        // Build a minimal response (unused body) so we can reuse some header logic if desired.
+        let resp = axum::response::Response::builder()
+            .status(http::StatusCode::OK)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        return Ok(Some((resp, CacheDecision::HitForMiss)));
+    }
 
     // VCL hit logic: pass if client states matches invalidation states
     if let (Some(req_states), Some(obj_states)) = (
@@ -248,7 +308,12 @@ fn lookup(
     let mut resp = resp;
     *resp.headers_mut() = headers;
 
-    Ok(Some((resp, stale)))
+    let decision = if stale {
+        CacheDecision::Stale
+    } else {
+        CacheDecision::Hit
+    };
+    Ok(Some((resp, decision)))
 }
 
 async fn fetch_upstream_raw(
@@ -293,6 +358,34 @@ fn store(
     body: &Bytes,
     ttl: Duration,
 ) -> Result<(), String> {
+    store_inner(cache, key, url, status, headers, body, ttl, false)
+}
+
+fn store_hit_for_miss(cache: &Cache, key: &str, url: &Uri, ttl: Duration) -> Result<(), String> {
+    let empty_headers = HeaderMap::new();
+    store_inner(
+        cache,
+        key,
+        url,
+        http::StatusCode::OK,
+        &empty_headers,
+        &Bytes::new(),
+        ttl,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn store_inner(
+    cache: &Cache,
+    key: &str,
+    url: &Uri,
+    status: http::StatusCode,
+    headers: &HeaderMap,
+    body: &Bytes,
+    ttl: Duration,
+    hit_for_miss: bool,
+) -> Result<(), String> {
     let grace = Duration::from_secs(60 * 60 * 24 * 3);
 
     let tags = headers
@@ -312,6 +405,7 @@ fn store(
 
     let meta = disk::StoredMeta {
         url: url.to_string(),
+        hit_for_miss,
         stored_at_ms: disk::now_ms(),
         ttl_ms: ttl.as_millis() as u64,
         grace_ms: grace.as_millis() as u64,

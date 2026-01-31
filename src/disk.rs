@@ -24,6 +24,12 @@ pub struct StoredMeta {
     #[serde(default)]
     pub url: String,
 
+    /// Varnish-style hit-for-miss marker: entry exists but should never be served.
+    ///
+    /// If true, lookups treat this as a cache bypass for a short TTL.
+    #[serde(default)]
+    pub hit_for_miss: bool,
+
     pub stored_at_ms: u64,
     pub ttl_ms: u64,
     pub grace_ms: u64,
