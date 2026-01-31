@@ -1,11 +1,6 @@
-mod normalize;
-mod config;
-mod cache;
-mod purge;
-
 use axum::{
     extract::{ConnectInfo, State},
-    http::{HeaderMap, Method, Request, StatusCode, Uri},
+    http::{Method, Request, StatusCode},
     response::IntoResponse,
     routing::any,
     Router,
@@ -13,14 +8,7 @@ use axum::{
 use std::{net::SocketAddr, sync::Arc};
 use tracing::{info, warn};
 
-use crate::{cache::Cache, config::Config, purge::is_purger_allowed};
-
-#[derive(Clone)]
-struct AppState {
-    cfg: Arc<Config>,
-    cache: Arc<Cache>,
-    client: reqwest::Client,
-}
+use codycache::{cache, config::Config, normalize, purge, AppState};
 
 #[tokio::main]
 async fn main() {
@@ -29,7 +17,7 @@ async fn main() {
         .init();
 
     let cfg = Arc::new(Config::from_env().expect("config"));
-    let cache = Arc::new(Cache::new());
+    let cache = Arc::new(codycache::cache::Cache::new(&cfg.cache_dir).expect("cache"));
 
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
@@ -38,22 +26,15 @@ async fn main() {
 
     let state = AppState { cfg, cache, client };
 
-    let app = Router::new()
-        .route("/*path", any(handle))
-        .with_state(state);
+    let app = Router::new().route("/*path", any(handle)).with_state(state.clone());
 
-    info!(listen = %app_state_listen(&app), "starting");
-
-    // bind + serve
     let listener = tokio::net::TcpListener::bind(&state.cfg.listen).await.expect("bind");
-    info!(listen = %state.cfg.listen, origin = %state.cfg.origin, "CodyCache listening");
+    info!(listen = %state.cfg.listen, origin = %state.cfg.origin, cache_dir = %state.cfg.cache_dir, "CodyCache listening");
 
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .await
         .expect("serve");
 }
-
-fn app_state_listen(_app: &Router) -> &'static str { "(see logs)" }
 
 async fn handle(
     State(state): State<AppState>,
@@ -63,9 +44,9 @@ async fn handle(
     let method = req.method().clone();
     let uri = req.uri().clone();
 
-    // PURGE/BAN handling (Shopware VCL parity)
+    // PURGE/BAN handling
     if method == Method::from_bytes(b"PURGE").unwrap() || method == Method::from_bytes(b"BAN").unwrap() {
-        if !is_purger_allowed(peer.ip(), &state.cfg.purgers) {
+        if !purge::is_purger_allowed(peer.ip(), &state.cfg.purgers) {
             return (StatusCode::FORBIDDEN, "Forbidden").into_response();
         }
 
@@ -74,15 +55,6 @@ async fn handle(
         } else {
             return purge::handle_ban(state.cache.clone(), &uri).into_response();
         }
-    }
-
-    // Only handle relevant methods; others: "pipe" (we just proxy without caching)
-    let allowed = matches!(
-        method,
-        Method::GET | Method::HEAD | Method::PUT | Method::POST | Method::PATCH | Method::TRACE | Method::OPTIONS | Method::DELETE
-    );
-    if !allowed {
-        return proxy_only(state, peer, req).await;
     }
 
     // Authorization => pass
@@ -96,10 +68,8 @@ async fn handle(
     }
 
     // Pass these paths
-    if let Some(path) = uri.path_and_query().map(|pq| pq.path()) {
-        if normalize::is_pass_path(path) {
-            return proxy_only(state, peer, req).await;
-        }
+    if normalize::is_pass_path(uri.path()) {
+        return proxy_only(state, peer, req).await;
     }
 
     // Special-case widgets checkout info
@@ -109,21 +79,17 @@ async fn handle(
         }
     }
 
-    // Cacheable path: normalize + lookup
-    match cache::handle_cached(state, peer, req).await {
+    match cache::handle_cached(state.clone(), peer, req).await {
         Ok(resp) => resp,
         Err(e) => {
             warn!(error = %e, %uri, "cache handler error; proxying");
-            proxy_only(state, peer, e.into_request()).await
+            // fall back to a direct proxy using the original URI
+            proxy_only(state, peer, Request::builder().uri(uri).body(axum::body::Body::empty()).unwrap()).await
         }
     }
 }
 
-async fn proxy_only(
-    state: AppState,
-    peer: SocketAddr,
-    req: Request<axum::body::Body>,
-) -> axum::response::Response {
+async fn proxy_only(state: AppState, peer: SocketAddr, req: Request<axum::body::Body>) -> axum::response::Response {
     let mut headers = req.headers().clone();
     normalize::apply_forwarded_for(&mut headers, peer.ip());
     headers.insert(
@@ -134,24 +100,35 @@ async fn proxy_only(
     let (parts, body) = req.into_parts();
     let upstream_url = normalize::build_upstream_url(&state.cfg.origin, &parts.uri);
 
-    let mut upstream = state.client.request(parts.method, upstream_url);
-    upstream = upstream.headers(headers);
-
-    // For now: we buffer bodies to keep implementation simple.
+    // Buffering for now (later: streaming)
     let body_bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap_or_default();
-    upstream = upstream.body(body_bytes);
 
-    let res = upstream.send().await;
-    match res {
-        Ok(up) => normalize::reqwest_to_axum_response(up, &parts.uri),
+    match state
+        .client
+        .request(parts.method, upstream_url)
+        .headers(headers)
+        .body(body_bytes)
+        .send()
+        .await
+    {
+        Ok(up) => {
+            let status = up.status();
+            let mut headers = up.headers().clone();
+            let bytes = up.bytes().await.unwrap_or_default();
+
+            normalize::apply_client_cache_policy(&parts.uri, &mut headers);
+            normalize::strip_internal_headers(&mut headers);
+
+            let mut resp = axum::response::Response::builder()
+                .status(status)
+                .body(axum::body::Body::from(bytes))
+                .unwrap();
+            *resp.headers_mut() = headers;
+            resp
+        }
         Err(err) => {
             warn!(error = %err, "upstream error");
             (StatusCode::BAD_GATEWAY, "Bad Gateway").into_response()
         }
     }
-}
-
-// Small helper for error plumbing
-trait IntoRequest {
-    fn into_request(self) -> Request<axum::body::Body>;
 }

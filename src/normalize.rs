@@ -107,36 +107,7 @@ pub fn normalize_uri(uri: &Uri) -> Uri {
     out.parse().unwrap_or_else(|_| raw.parse().unwrap())
 }
 
-pub fn reqwest_to_axum_response(up: reqwest::Response, orig_uri: &Uri) -> axum::response::Response {
-    let status = up.status();
-    let headers = up.headers().clone();
-
-    let body = match tokio::runtime::Handle::try_current() {
-        Ok(_) => {
-            // blocking is bad; but for now we synchronously build response using async via block_in_place
-            tokio::task::block_in_place(|| {
-                futures_util::executor::block_on(async {
-                    up.bytes().await.unwrap_or_default().to_vec()
-                })
-            })
-        }
-        Err(_) => vec![],
-    };
-
-    let mut resp = axum::response::Response::builder()
-        .status(status)
-        .body(axum::body::Body::from(body))
-        .unwrap();
-
-    *resp.headers_mut() = headers;
-
-    // Deliver-stage header stripping & client no-store policy will be applied elsewhere for cached responses too.
-    // For proxy-only responses, still apply the client no-store rule from VCL.
-    apply_client_cache_policy(orig_uri, resp.headers_mut());
-    strip_internal_headers(resp.headers_mut());
-
-    resp
-}
+// NOTE: moved response conversion into request handlers to keep this module sync-only.
 
 pub fn strip_internal_headers(headers: &mut HeaderMap) {
     headers.remove("sw-invalidation-states");

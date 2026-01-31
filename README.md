@@ -39,6 +39,8 @@ docker build -t codycache .
 docker run --rm -p 8080:8080 \
   -e CODYCACHE_ORIGIN=http://127.0.0.1:8000 \
   -e CODYCACHE_PURGERS=127.0.0.1/32,::1/128 \
+  -e CODYCACHE_CACHE_DIR=/var/lib/codycache \
+  -v $PWD/.codycache:/var/lib/codycache \
   codycache
 ```
 
@@ -47,6 +49,7 @@ docker run --rm -p 8080:8080 \
 - `CODYCACHE_LISTEN` (default `0.0.0.0:8080`)
 - `CODYCACHE_ORIGIN` (required) e.g. `http://shopware:8000`
 - `CODYCACHE_PURGERS` comma-separated CIDRs/IPs allowed to PURGE/BAN
+- `CODYCACHE_CACHE_DIR` directory for the disk cache (default `./cache`)
 
 ## License
 

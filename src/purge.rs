@@ -10,19 +10,14 @@ pub fn is_purger_allowed(ip: std::net::IpAddr, purgers: &[IpNet]) -> bool {
 pub fn handle_purge(cache: std::sync::Arc<Cache>, uri: &Uri, headers: &HeaderMap) -> (StatusCode, String) {
     if let Some(xkey) = headers.get("xkey").and_then(|v| v.to_str().ok()) {
         let tags: Vec<String> = xkey.split_whitespace().map(|s| s.to_string()).collect();
-        let gone = cache.purge_tags(&tags);
-        return (StatusCode::OK, format!("Invalidated {gone} objects"));
+        match cache.purge_tags(&tags) {
+            Ok(gone) => return (StatusCode::OK, format!("Invalidated {gone} objects")),
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e),
+        }
     }
 
-    // Purge-by-URL: best-effort (we don't currently have a reverse index from URL->keys)
-    // So we just purge by normalized URL key without context, as a starting point.
-    let key = blake3::hash(uri.to_string().as_bytes()).to_hex().to_string();
-    let ok = cache.purge_key(&key);
-    if ok {
-        (StatusCode::OK, "Purged".to_string())
-    } else {
-        (StatusCode::NOT_FOUND, "Not found".to_string())
-    }
+    // TODO: implement URL->keys index (respect variants). For now: return 501 so it isn't misleading.
+    (StatusCode::NOT_IMPLEMENTED, format!("PURGE-by-URL not implemented (requested {})", uri.path()))
 }
 
 pub fn handle_ban(_cache: std::sync::Arc<Cache>, uri: &Uri) -> (StatusCode, String) {
