@@ -3,12 +3,12 @@ use http::HeaderMap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
-    fs, io,
+    fs,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DiskStore {
     root: PathBuf,
     db: sled::Db,

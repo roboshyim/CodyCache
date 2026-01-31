@@ -82,10 +82,10 @@ async fn handle(
     }
 
     // Special-case widgets checkout info
-    if uri.path() == "/widgets/checkout/info" {
-        if normalize::should_short_circuit_widgets_checkout_info(&req) {
-            return (StatusCode::NO_CONTENT, "").into_response();
-        }
+    if uri.path() == "/widgets/checkout/info"
+        && normalize::should_short_circuit_widgets_checkout_info(&req)
+    {
+        return (StatusCode::NO_CONTENT, "").into_response();
     }
 
     match cache::handle_cached(state.clone(), peer, req).await {
