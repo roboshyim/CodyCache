@@ -25,6 +25,40 @@ pub fn apply_forwarded_for(headers: &mut HeaderMap, ip: std::net::IpAddr) {
     headers.insert("x-forwarded-for", HeaderValue::from_str(&new_val).unwrap());
 }
 
+/// Shopware VCL parity: set `sw-cache-hash` header from cookie when missing.
+///
+/// In Varnish, `req.http.sw-cache-hash` is derived from the cookie in vcl_recv.
+pub fn apply_shopware_request_normalization(headers: &mut HeaderMap) {
+    // Header wins.
+    if headers
+        .get("sw-cache-hash")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| !v.is_empty())
+    {
+        return;
+    }
+
+    let cookie = headers.get(http::header::COOKIE).and_then(|v| v.to_str().ok()).unwrap_or("");
+    if cookie.is_empty() {
+        return;
+    }
+
+    for part in cookie.split(';') {
+        let p = part.trim();
+        if let Some((k, v)) = p.split_once('=') {
+            if k.trim() == "sw-cache-hash" {
+                let v = v.trim();
+                if !v.is_empty() {
+                    if let Ok(hv) = HeaderValue::from_str(v) {
+                        headers.insert("sw-cache-hash", hv);
+                    }
+                }
+                return;
+            }
+        }
+    }
+}
+
 pub fn build_upstream_url(origin: &str, uri: &Uri) -> String {
     // origin like http://host:port
     let mut base = origin.trim_end_matches('/').to_string();
@@ -51,9 +85,6 @@ pub fn should_short_circuit_widgets_checkout_info(req: &http::Request<axum::body
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if sw_cache_hash.is_empty() {
-        // We might still have a cookie, but VCL sets header from cookie only in vcl_recv.
-        // In our implementation, we treat missing header as "missing" to keep behavior explicit.
-        // (We will likely move cookie->header extraction into request normalization.)
         return true;
     }
 
@@ -202,12 +233,33 @@ mod tests {
     }
 
     #[test]
+<<<<<<< HEAD
     fn widgets_checkout_info_short_circuit_rules() {
         // missing header => short circuit
         let req = http::Request::builder()
             .uri("/widgets/checkout/info")
             .body(axum::body::Body::empty())
             .unwrap();
+=======
+    fn request_normalization_sets_sw_cache_hash_from_cookie() {
+        let mut headers = HeaderMap::new();
+        headers.insert(http::header::COOKIE, HeaderValue::from_static("a=1; sw-cache-hash=xyz; b=2"));
+        apply_shopware_request_normalization(&mut headers);
+        assert_eq!(headers.get("sw-cache-hash").unwrap().to_str().unwrap(), "xyz");
+
+        // header wins
+        let mut headers = HeaderMap::new();
+        headers.insert("sw-cache-hash", HeaderValue::from_static("hdr"));
+        headers.insert(http::header::COOKIE, HeaderValue::from_static("sw-cache-hash=cookie"));
+        apply_shopware_request_normalization(&mut headers);
+        assert_eq!(headers.get("sw-cache-hash").unwrap().to_str().unwrap(), "hdr");
+    }
+
+    #[test]
+    fn widgets_checkout_info_short_circuit_rules() {
+        // missing header => short circuit
+        let req = http::Request::builder().uri("/widgets/checkout/info").body(axum::body::Body::empty()).unwrap();
+>>>>>>> b361b93 (Derive sw-cache-hash header from cookie)
         assert!(should_short_circuit_widgets_checkout_info(&req));
 
         // header present and no sw-states cookie => do not short circuit

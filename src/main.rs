@@ -48,6 +48,11 @@ async fn handle(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     req: Request<axum::body::Body>,
 ) -> impl IntoResponse {
+    // Request normalization (Shopware parity)
+    // (e.g. derive sw-cache-hash header from cookie when not explicitly set)
+    let mut req = req;
+    normalize::apply_shopware_request_normalization(req.headers_mut());
+
     let method = req.method().clone();
     let uri = req.uri().clone();
 
